@@ -21,7 +21,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList
 
 
@@ -45,39 +45,6 @@ class MultiTokenStoppingCriteria(StoppingCriteria):
             if stop_string in generated_text:
                 return True
         return False
-
-
-def find_reasoning_token_span(prompt: str, generated_text: str, full_text: str, 
-                              input_ids: torch.Tensor) -> tuple:
-    """
-    Find the token span corresponding to reasoning tokens.
-    Reasoning tokens are between the end of the prompt and the "####" marker.
-    
-    Args:
-        prompt: The original prompt string
-        generated_text: The generated response text (after prompt)
-        full_text: The full concatenated text (prompt + generated_text)
-        input_ids: The tokenized sequence
-        
-    Returns:
-        (reasoning_start_idx, reasoning_end_idx): Token indices for reasoning span
-    """
-    # Find where "####" appears in the generated text
-    if "####" in generated_text:
-        answer_start_in_generated = generated_text.find("####")
-        reasoning_text = generated_text[:answer_start_in_generated]
-    else:
-        # If no ####, consider all generated text as reasoning
-        reasoning_text = generated_text
-    
-    # The reasoning starts right after the prompt
-    reasoning_start_char = len(prompt)
-    reasoning_end_char = len(prompt) + len(reasoning_text)
-    
-    # Return as token indices (approximate - we'll use prompt token count)
-    # reasoning_start_idx is the length of the prompt in tokens
-    # reasoning_end_idx needs to be computed from the full sequence
-    return reasoning_start_char, reasoning_end_char
 
 
 def compute_reasoning_features(hidden_states: torch.Tensor, 
@@ -286,7 +253,7 @@ def extract_activations_from_lm_eval_output(
             'do_sample': gen_kwargs.get('do_sample', False),
             'pad_token_id': tokenizer.eos_token_id,
             'return_dict_in_generate': True,
-            'output_hidden_states': False,  # We're using hooks instead
+            'output_hidden_states': False,  # We'll do a separate forward pass for activations
         }
         
         # Add temperature only if sampling
@@ -504,14 +471,15 @@ def verify_mapping(activation_file: str, samples_jsonl_path: str):
         sample = samples_dict[doc_id]
         
         # Verify extracted answer matches
-        lm_eval_answer = sample.get('filtered_resps', [[None]])[0]
+        fr = sample.get('filtered_resps')
+        lm_eval_answer = fr[0] if fr else "[invalid]"
         our_answer = act_item.get('extracted_answer')
         
         # Verify correctness matches
         expected_correct = sample.get('exact_match', 0) == 1.0
         actual_correct = act_item['is_correct']
         
-        answer_match = (our_answer == lm_eval_answer) if lm_eval_answer else True
+        answer_match = (our_answer == lm_eval_answer) if lm_eval_answer != "[invalid]" else True
         correct_match = (actual_correct == expected_correct)
         
         if not answer_match or not correct_match:
@@ -578,23 +546,14 @@ if __name__ == "__main__":
     samples_path = "outputs/qwen25-math-gsm8k/Qwen__Qwen2.5-Math-1.5B/samples_gsm8k_2025-11-11T07-12-57.068782.jsonl"
     model_name = "Qwen/Qwen2.5-Math-1.5B"
     
-    # Load model temporarily to get number of layers
-    print(f"Loading model to determine layer count: {model_name}")
-    temp_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-        device_map="cuda:0",
-    )
-    num_layers = len(temp_model.model.layers)
+    # Get number of layers from config (no need to load full model)
+    print(f"Loading config to determine layer count: {model_name}")
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    num_layers = config.num_hidden_layers
     print(f"Model has {num_layers} layers\n")
     
     # Calculate which layers to extract
     layers_to_extract = calculate_layer_indices(num_layers)
-    
-    # Clean up temporary model
-    del temp_model
-    torch.cuda.empty_cache()
     
     activation_data = extract_activations_from_lm_eval_output(
         samples_jsonl_path=samples_path,
@@ -602,7 +561,7 @@ if __name__ == "__main__":
         layer_indices=layers_to_extract,
         output_path="outputs/activations/activations_gsm8k.json",
         device="cuda:0",
-        max_samples=2,  # Start with small number for testing, set to None for all
+        max_samples= None,  # Start with small number for testing, set to None for all
     )
     
     # Verify the mapping is correct
