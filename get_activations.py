@@ -543,8 +543,8 @@ def calculate_layer_indices(num_layers: int) -> List[int]:
 if __name__ == "__main__":
     # Extract activations from your existing lm_eval output
    
-    samples_path = "outputs/qwen25-math-gsm8k/Qwen__Qwen2.5-Math-1.5B/samples_gsm8k_2025-11-11T07-12-57.068782.jsonl"
-    model_name = "Qwen/Qwen2.5-Math-1.5B"
+    samples_path = "outputs/r1-gsm8k/deepseek-ai__DeepSeek-R1-Distill-Qwen-1.5B/samples_gsm8k_2025-11-14T04-58-55.219862.jsonl"
+    model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
     
     # Get number of layers from config (no need to load full model)
     print(f"Loading config to determine layer count: {model_name}")
@@ -559,13 +559,13 @@ if __name__ == "__main__":
         samples_jsonl_path=samples_path,
         model_name=model_name,
         layer_indices=layers_to_extract,
-        output_path="outputs/activations/activations_gsm8k.json",
+        output_path="outputs/activations/activations_deepseek_r1_gsm8k.json",
         device="cuda:0",
         max_samples= None,  # Start with small number for testing, set to None for all
     )
     
     # Verify the mapping is correct
     verify_mapping(
-        "outputs/activations/activations_gsm8k.json",
+        "outputs/activations/activations_deepseek_r1_gsm8k.json",
         samples_path
     )
