@@ -122,6 +122,230 @@ def extract_answer_gsm8k(text: str, fallback: str = "[invalid]") -> str:
         return fallback
 
 
+def last_boxed_only_string(string: str) -> str:
+    """
+    Extract the last \\boxed{...} expression from a string.
+    From lm_eval/tasks/hendrycks_math/utils.py
+    """
+    idx = string.rfind("\\boxed")
+    if "\\boxed " in string:
+        return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
+    if idx < 0:
+        idx = string.rfind("\\fbox")
+        if idx < 0:
+            return None
+
+    i = idx
+    right_brace_idx = None
+    num_left_braces_open = 0
+    while i < len(string):
+        if string[i] == "{":
+            num_left_braces_open += 1
+        if string[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
+                break
+        i += 1
+
+    if right_brace_idx is None:
+        retval = None
+    else:
+        retval = string[idx : right_brace_idx + 1]
+
+    return retval
+
+
+def remove_boxed(s: str) -> str:
+    """
+    Remove \\boxed{...} wrapper from a string.
+    From lm_eval/tasks/hendrycks_math/utils.py
+    """
+    if s is None:
+        return None
+    if "\\boxed " in s:
+        left = "\\boxed "
+        if s[: len(left)] == left:
+            return s[len(left) :]
+        return None
+
+    left = "\\boxed{"
+    if s[: len(left)] == left and s[-1] == "}":
+        return s[len(left) : -1]
+    return None
+
+
+def strip_string(string: str) -> str:
+    """
+    Normalize a mathematical expression string.
+    From lm_eval/tasks/hendrycks_math/utils.py
+    """
+    # linebreaks
+    string = string.replace("\n", "")
+    # remove inverse spaces
+    string = string.replace("\\!", "")
+    # replace \\ with \
+    string = string.replace("\\\\", "\\")
+    # replace tfrac and dfrac with frac
+    string = string.replace("tfrac", "frac")
+    string = string.replace("dfrac", "frac")
+    # remove \left and \right
+    string = string.replace("\\left", "")
+    string = string.replace("\\right", "")
+    # Remove circ (degrees)
+    string = string.replace("^{\\circ}", "")
+    string = string.replace("^\\circ", "")
+    # remove dollar signs
+    string = string.replace("\\$", "")
+    # remove units (on the right)
+    if "\\text{ " in string:
+        splits = string.split("\\text{ ")
+        if len(splits) == 2:
+            string = splits[0]
+    # remove percentage
+    string = string.replace("\\%", "")
+    string = string.replace("\%", "")  # noqa: W605
+    # " 0." equivalent to " ." and "{0." equivalent to "{."
+    string = string.replace(" .", " 0.")
+    string = string.replace("{.", "{0.")
+    if len(string) == 0:
+        return string
+    if string[0] == ".":
+        string = "0" + string
+    # to consider: get rid of e.g. "k = " or "q = " at beginning
+    if len(string.split("=")) == 2:
+        if len(string.split("=")[0]) <= 2:
+            string = string.split("=")[1]
+    # fix sqrt3 --> sqrt{3}
+    if "\\sqrt" in string:
+        splits = string.split("\\sqrt")
+        new_string = splits[0]
+        for split in splits[1:]:
+            if split[0] != "{":
+                a = split[0]
+                new_substr = "\\sqrt{" + a + "}" + split[1:]
+            else:
+                new_substr = "\\sqrt" + split
+            new_string += new_substr
+        string = new_string
+    # remove spaces
+    string = string.replace(" ", "")
+    # fix fracs
+    substrs = string.split("\\frac")
+    new_str = substrs[0]
+    if len(substrs) > 1:
+        substrs = substrs[1:]
+        for substr in substrs:
+            new_str += "\\frac"
+            if substr[0] == "{":
+                new_str += substr
+            else:
+                if len(substr) >= 2:
+                    a = substr[0]
+                    b = substr[1]
+                    if b != "{":
+                        if len(substr) > 2:
+                            post_substr = substr[2:]
+                            new_str += "{" + a + "}{" + b + "}" + post_substr
+                        else:
+                            new_str += "{" + a + "}{" + b + "}"
+                    else:
+                        if len(substr) > 2:
+                            post_substr = substr[2:]
+                            new_str += "{" + a + "}" + b + post_substr
+                        else:
+                            new_str += "{" + a + "}" + b
+        string = new_str
+    # manually change 0.5 --> \frac{1}{2}
+    if string == "0.5":
+        string = "\\frac{1}{2}"
+    # fix a/b --> \frac{a}{b}
+    if len(string.split("/")) == 2:
+        a = string.split("/")[0]
+        b = string.split("/")[1]
+        try:
+            a_int = int(a)
+            b_int = int(b)
+            if string == "{}/{}".format(a_int, b_int):
+                string = "\\frac{" + str(a_int) + "}{" + str(b_int) + "}"
+        except (ValueError, AssertionError):
+            pass
+    return string
+
+
+def is_equiv(str1: str, str2: str, verbose: bool = False) -> bool:
+    """
+    Check if two mathematical expressions are equivalent.
+    From lm_eval/tasks/hendrycks_math/utils.py
+    """
+    if str1 is None and str2 is None:
+        if verbose:
+            print("WARNING: Both None")
+        return True
+    if str1 is None or str2 is None:
+        return False
+
+    try:
+        ss1 = strip_string(str1)
+        ss2 = strip_string(str2)
+        if verbose:
+            print(ss1, ss2)
+        return ss1 == ss2
+    except Exception:
+        return str1 == str2
+
+
+def extract_answer_hendrycks_math(text: str, fallback: str = "[invalid]") -> str:
+    """
+    Extract answer from hendrycks_math response.
+    Uses the same logic as lm_eval's process_results for hendrycks_math.
+    
+    Args:
+        text: The model's generated response
+        fallback: Value to return if no match found
+        
+    Returns:
+        Extracted answer string or fallback
+    """
+    # First try to extract from $...$ format (content between first and last $)
+    indices = [pos for pos, char in enumerate(text) if char == "$"]
+    if len(indices) <= 1:
+        answer = text
+    else:
+        answer = text[indices[0] + 1 : indices[-1]]
+    
+    # Try to extract from boxed format if available
+    boxed_str = last_boxed_only_string(text)
+    if boxed_str:
+        try:
+            boxed_content = remove_boxed(boxed_str)
+            if boxed_content:
+                answer = boxed_content
+        except (AssertionError, AttributeError):
+            pass
+    
+    return answer if answer else fallback
+
+
+def evaluate_exact_match_hendrycks_math(prediction: str, reference: str) -> bool:
+    """
+    Evaluate exact match using the same logic as lm_eval for hendrycks_math.
+    Uses is_equiv to check if two mathematical expressions are equivalent.
+    
+    Args:
+        prediction: The extracted answer from model response
+        reference: The target answer from the dataset
+        
+    Returns:
+        True if answers are equivalent, False otherwise
+    """
+    # If prediction is invalid, it's not a match
+    if prediction == "[invalid]":
+        return False
+    
+    return is_equiv(prediction, reference)
+
+
 def evaluate_exact_match_gsm8k(prediction: str, reference: str) -> bool:
     """
     Evaluate exact match using the same logic as lm_eval for GSM8K.
@@ -177,6 +401,7 @@ def extract_activations_from_lm_eval_output(
     output_path: str = "outputs/activations/activations_with_results.json",
     device: str = "cuda:0",
     max_samples: int = None,
+    dataset_type: str = "gsm8k",  # "gsm8k" or "hendrycks_math"
 ):
     """
     Extract activations using the exact prompts from lm_eval output.
@@ -188,6 +413,7 @@ def extract_activations_from_lm_eval_output(
         output_path: Where to save the activation data
         device: Device to run on
         max_samples: Maximum number of samples to process (None = all)
+        dataset_type: "gsm8k" or "hendrycks_math" - determines answer extraction logic
     """
     
     print(f"Loading model: {model_name}")
@@ -290,18 +516,28 @@ def extract_activations_from_lm_eval_output(
                     break
         
         # Extract the answer from our generated response using the same logic as lm_eval
-        our_extracted_answer = extract_answer_gsm8k(generated_text)
-        
-        # Get the original lm_eval extracted answer
-        lm_eval_extracted_answer = sample['filtered_resps'][0] if sample.get('filtered_resps') else "[invalid]"
-        
-        # Evaluate our response using the same logic as lm_eval
-        target_answer = sample['target']
-        our_is_correct = evaluate_exact_match_gsm8k(our_extracted_answer, target_answer)
+        if dataset_type == "hendrycks_math":
+            our_extracted_answer = extract_answer_hendrycks_math(generated_text)
+            # For hendrycks_math, filtered_resps contains the full response, not just the answer
+            # So we need to extract the answer from it too
+            lm_eval_response = sample['filtered_resps'][0] if sample.get('filtered_resps') else ""
+            lm_eval_extracted_answer = extract_answer_hendrycks_math(lm_eval_response)
+            target_answer = sample['target']
+            our_is_correct = evaluate_exact_match_hendrycks_math(our_extracted_answer, target_answer)
+        else:  # gsm8k
+            our_extracted_answer = extract_answer_gsm8k(generated_text)
+            # Get the original lm_eval extracted answer
+            lm_eval_extracted_answer = sample['filtered_resps'][0] if sample.get('filtered_resps') else "[invalid]"
+            target_answer = sample['target']
+            our_is_correct = evaluate_exact_match_gsm8k(our_extracted_answer, target_answer)
         
         # Check if our result matches the original lm_eval result
         # Compare both the extracted answer AND the correctness evaluation
-        answers_match = (our_extracted_answer == lm_eval_extracted_answer)
+        # For hendrycks_math, we compare using is_equiv since answers might be formatted differently
+        if dataset_type == "hendrycks_math":
+            answers_match = is_equiv(our_extracted_answer, lm_eval_extracted_answer) if lm_eval_extracted_answer != "[invalid]" else False
+        else:
+            answers_match = (our_extracted_answer == lm_eval_extracted_answer)
         
         # Also verify correctness matches (if exact_match field exists)
         if 'exact_match' in sample:
@@ -343,17 +579,18 @@ def extract_activations_from_lm_eval_output(
         hidden_states_all_layers = outputs.hidden_states
         
         # Find reasoning token span
-        # Reasoning tokens start after the prompt and end before "####"
+        # Reasoning tokens start after the prompt
         reasoning_start_idx = prompt_token_length
         
-        # Find where "####" appears in the generated text to mark end of reasoning
-        if "####" in generated_text:
+        # For GSM8K, reasoning ends before "####"
+        # For hendrycks_math, use the full generated response as reasoning
+        if dataset_type == "gsm8k" and "####" in generated_text:
             # Tokenize up to "####" to find the token index
             text_before_answer = prompt + generated_text.split("####")[0]
             tokens_before_answer = tokenizer(text_before_answer, return_tensors="pt").input_ids
             reasoning_end_idx = tokens_before_answer.shape[1]
         else:
-            # If no ####, use the full sequence
+            # For hendrycks_math or if no ####, use the full sequence
             reasoning_end_idx = full_inputs.input_ids.shape[1]
         
         # Extract features for each requested layer
@@ -385,9 +622,15 @@ def extract_activations_from_lm_eval_output(
         
         # Compile all data for this sample
         # Note: We use our verified inference results, not the original sample's
+        # Handle different field names for different datasets
+        if dataset_type == "hendrycks_math":
+            question_field = sample['doc'].get('problem', '')
+        else:  # gsm8k
+            question_field = sample['doc'].get('question', '')
+        
         activation_data.append({
             'doc_id': doc_id,
-            'question': sample['doc']['question'],
+            'question': question_field,
             'target': sample['target'],
             'prompt': prompt,  # The exact prompt used
             'model_response': generated_text,  # Our generated response (verified to match)
@@ -437,13 +680,18 @@ def extract_activations_from_lm_eval_output(
     return activation_data
 
 
-def verify_mapping(activation_file: str, samples_jsonl_path: str):
+def verify_mapping(activation_file: str, samples_jsonl_path: str, dataset_type: str = "gsm8k"):
     """
     Verify that activations are correctly mapped to lm_eval results.
     This now verifies that:
     1. The extracted answers match the lm_eval filtered responses
     2. The correctness evaluations match
     3. All samples in the activation file passed the mismatch check
+    
+    Args:
+        activation_file: Path to the activation JSON file
+        samples_jsonl_path: Path to the samples JSONL file from lm_eval
+        dataset_type: "gsm8k" or "hendrycks_math"
     """
     # Load both files
     with open(activation_file, 'r') as f:
@@ -472,14 +720,25 @@ def verify_mapping(activation_file: str, samples_jsonl_path: str):
         
         # Verify extracted answer matches
         fr = sample.get('filtered_resps')
-        lm_eval_answer = fr[0] if fr else "[invalid]"
+        if dataset_type == "hendrycks_math":
+            # For hendrycks_math, filtered_resps contains the full response, extract answer from it
+            lm_eval_response = fr[0] if fr else ""
+            lm_eval_answer = extract_answer_hendrycks_math(lm_eval_response)
+        else:  # gsm8k
+            lm_eval_answer = fr[0] if fr else "[invalid]"
+        
         our_answer = act_item.get('extracted_answer')
         
         # Verify correctness matches
         expected_correct = sample.get('exact_match', 0) == 1.0
         actual_correct = act_item['is_correct']
         
-        answer_match = (our_answer == lm_eval_answer) if lm_eval_answer != "[invalid]" else True
+        # For hendrycks_math, use is_equiv for comparison
+        if dataset_type == "hendrycks_math":
+            answer_match = is_equiv(our_answer, lm_eval_answer) if lm_eval_answer != "[invalid]" else False
+        else:
+            answer_match = (our_answer == lm_eval_answer) if lm_eval_answer != "[invalid]" else True
+        
         correct_match = (actual_correct == expected_correct)
         
         if not answer_match or not correct_match:
@@ -541,10 +800,9 @@ def calculate_layer_indices(num_layers: int) -> List[int]:
 
 
 if __name__ == "__main__":
-    # Extract activations from your existing lm_eval output
-   
-    samples_path = "outputs/r1-gsm8k/deepseek-ai__DeepSeek-R1-Distill-Qwen-1.5B/samples_gsm8k_2025-11-14T04-58-55.219862.jsonl"
-    model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    # Extract activations for Qwen 2.5 Math 1.5B on hendrycks_math_algebra
+    samples_path = "outputs/qwen25_hendrycks_math/Qwen__Qwen2.5-Math-1.5B/samples_hendrycks_math_algebra_2025-11-18T13-28-19.092679.jsonl"
+    model_name = "Qwen/Qwen2.5-Math-1.5B"
     
     # Get number of layers from config (no need to load full model)
     print(f"Loading config to determine layer count: {model_name}")
@@ -559,13 +817,15 @@ if __name__ == "__main__":
         samples_jsonl_path=samples_path,
         model_name=model_name,
         layer_indices=layers_to_extract,
-        output_path="outputs/activations/activations_deepseek_r1_gsm8k.json",
+        output_path="outputs/activations/activations_qwen25_math_hendrycks_math_algebra.json",
         device="cuda:0",
-        max_samples= None,  # Start with small number for testing, set to None for all
+        max_samples=None,  # Process all samples
+        dataset_type="hendrycks_math",
     )
     
     # Verify the mapping is correct
     verify_mapping(
-        "outputs/activations/activations_deepseek_r1_gsm8k.json",
-        samples_path
+        "outputs/activations/activations_qwen25_math_hendrycks_math_algebra.json",
+        samples_path,
+        dataset_type="hendrycks_math"
     )
